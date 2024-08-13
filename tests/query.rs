@@ -1,4 +1,4 @@
-use dbx::{from, select, wh, wh_in, Args, Query, Type};
+use esql::{from, select, wh, wh_in, Args, Query, Type};
 
 #[test]
 fn simple_query() {
@@ -61,17 +61,3 @@ fn assert_query<'a>(
         )
     )
 }
-
-// async fn foo(db: &Pool) {
-//     use dbx::database::MysqlQueryExt;
-//     use mysql_async::Pool;
-
-//     let query = select("a")
-//         + select("b,c")
-//         + from("foobar")
-//         + wh("foo = 'bar'")
-//         + wh(("bar = ?", 1))
-//         + (wh(("d = ?", 10)) | wh(("e != ?", 20)));
-
-//     let foo: Vec<usize> = db.pluck(query, "b").await.unwrap();
-// }

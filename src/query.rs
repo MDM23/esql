@@ -32,9 +32,9 @@ impl Trusted for TrustedString {}
 /// let field = String::from("username");
 ///
 /// if ["id", "username", "email"].contains(&field.as_str()) {
-///     dbx::select(
+///     esql::select(
 ///         // SAFETY: field passed the whitelist-check
-///         unsafe { dbx::trusted(format!("{field} as my_field")) }
+///         unsafe { esql::trusted(format!("{field} as my_field")) }
 ///     );
 /// }
 /// ```

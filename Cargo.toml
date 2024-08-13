@@ -1,5 +1,5 @@
 [package]
-name = "dbx"
+name = "esql"
 version = "0.1.0"
 description = "Useful and lightweight database extension library for your Rust project"
 license = "MIT"
