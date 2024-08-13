@@ -1,18 +1,36 @@
 [package]
 name = "dbx"
 version = "0.1.0"
+description = "Useful and lightweight database extension library for your Rust project"
+license = "MIT"
 edition = "2021"
+keywords = ["database", "async", "postgres", "mysql"]
+categories = ["database", "asynchronous"]
 
 [features]
-tokio-postgres = [ "dep:tokio-postgres", "indexed-args" ]
+tokio-postgres = [ "dep:tokio-postgres" ]
 mysql-async = [ "dep:mysql_async", "dep:mysql_common" ]
-indexed-args = []
-
-default = ["mysql-async"]
+uuid = [ "dep:uuid", "tokio-postgres/with-uuid-1" ]
 
 [dependencies]
 futures-util = { version = "0.3", default-features = false }
 thiserror = "1.0"
-mysql_async = { version = "0.34", features = ["minimal"], default-features = false, optional = true }
-mysql_common = { version = "0.32", optional = true }
-tokio-postgres = { version = "0.7", default-features = false, optional = true }
+
+[dependencies.mysql_async]
+version = "0.34"
+features = ["minimal"]
+default-features = false
+optional = true
+
+[dependencies.mysql_common]
+version = "0.32"
+optional = true
+
+[dependencies.tokio-postgres]
+version = "0.7"
+default-features = false
+optional = true
+
+[dependencies.uuid]
+version = "1.10"
+optional = true

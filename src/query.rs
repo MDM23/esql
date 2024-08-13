@@ -1,371 +1,478 @@
-use std::fmt::{Display, Write};
+use std::ops::{Add, BitAnd, BitOr, Not};
 
-#[derive(Default)]
-pub struct Query {
-    #[cfg(feature = "tokio-postgres")]
-    args: Vec<Box<dyn tokio_postgres::types::ToSql>>,
+use crate::types::Type;
 
-    #[cfg(feature = "mysql-async")]
-    args: Vec<mysql_async::Value>,
+/// Marker trait for a trusted string-like value that can be used in a SQL query
+trait Trusted: ToString {}
 
-    #[cfg(all(not(feature = "tokio-postgres"), not(feature = "mysql-async")))]
-    args: Vec<String>,
+/// Wrapper type for a string whose trustworthiness must be validated by the
+/// developer. An instance of it can only be constructed by using the unsafe
+/// function [trusted]. This draws the developers attention to the possible
+/// risks and allows easier reviewing of code sections that potentially
+/// introduce SQL-injections.
+pub struct TrustedString(String);
 
-    arg_indexes: Vec<usize>,
-    buffer: String,
-    cursor: usize,
-    separated: bool,
+impl ToString for TrustedString {
+    fn to_string(&self) -> String {
+        self.0.clone()
+    }
 }
 
-impl Query {
-    pub fn new<F>(frag: F) -> Self
-    where
-        F: Fragment,
-    {
-        let mut query = Self::empty();
-        frag.push_to_query(&mut query);
-        query
-    }
+impl Trusted for &'static str {}
+impl Trusted for TrustedString {}
 
-    pub fn empty() -> Self {
-        Default::default()
-    }
+/// Turns the given string into a TrustedString instance. As the source is not a
+/// &'static str here, we cannot be sure that the source does not contain any
+/// unverified user input. In order to draw your attention to the risk of
+/// SQL-injections, this function is marked as unsafe. It can be used like
+/// follows:
+///
+/// ```
+/// // Let's just imagine that field comes from an untrusted source ...
+/// let field = String::from("username");
+///
+/// if ["id", "username", "email"].contains(&field.as_str()) {
+///     dbx::select(
+///         // SAFETY: field passed the whitelist-check
+///         unsafe { dbx::trusted(format!("{field} as my_field")) }
+///     );
+/// }
+/// ```
+pub unsafe fn trusted(value: impl ToString) -> TrustedString {
+    TrustedString(value.to_string())
+}
 
-    pub fn push<F>(&mut self, frag: F) -> &mut Self
-    where
-        F: Fragment,
-    {
-        self.separated = false;
+#[derive(Debug, PartialEq)]
+pub struct Args<'a>(pub Vec<Type<'a>>);
 
-        if !self.buffer.is_empty() {
-            self.append_buffer(" ");
-        }
+pub struct ArgString<'a> {
+    raw: String,
+    args: Args<'a>,
+}
 
-        frag.push_to_query(self);
+impl<'a> ArgString<'a> {
+    fn wrapped(mut self) -> Self {
+        self.raw.insert(0, '(');
+        self.raw.push(')');
         self
     }
+}
 
-    pub fn and<F>(&mut self, frag: F) -> &mut Self
-    where
-        F: Fragment,
-    {
-        if self.separated {
-            self.append_buffer(" AND ");
-        } else if !self.buffer.is_empty() {
-            self.append_buffer(" ");
+impl<'a, T: Trusted> From<T> for ArgString<'a> {
+    fn from(value: T) -> Self {
+        ArgString {
+            raw: value.to_string(),
+            args: Args(Vec::new()),
         }
-
-        frag.push_to_query(self);
-        self.separated = true;
-        self
-    }
-
-    pub fn comma<F>(&mut self, frag: F) -> &mut Self
-    where
-        F: Fragment,
-    {
-        if self.separated {
-            self.append_buffer(",");
-        } else if !self.buffer.is_empty() {
-            self.append_buffer(" ");
-        }
-
-        frag.push_to_query(self);
-        self.separated = true;
-        self
-    }
-
-    pub fn or<F>(&mut self, frag: F) -> &mut Self
-    where
-        F: Fragment,
-    {
-        if self.separated {
-            self.append_buffer(" OR ");
-        } else if !self.buffer.is_empty() {
-            self.append_buffer(" ");
-        }
-
-        frag.push_to_query(self);
-        self.separated = true;
-        self
-    }
-
-    fn append_buffer(&mut self, query: &str) {
-        self.append_buffer_with_args(query, vec![]);
     }
 }
 
-impl Query {
-    #[cfg(feature = "tokio-postgres")]
-    pub fn into_args(self) -> Vec<Box<dyn tokio_postgres::types::ToSql>> {
-        self.args
-    }
-
-    #[cfg(feature = "mysql-async")]
-    pub fn into_args(self) -> Vec<mysql_async::Value> {
-        self.args
-    }
-
-    #[cfg(all(not(feature = "tokio-postgres"), not(feature = "mysql-async")))]
-    pub fn into_args(self) -> Vec<String> {
-        self.args
-    }
-}
-
-impl Query {
-    #[cfg(feature = "tokio-postgres")]
-    fn append_buffer_with_args(
-        &mut self,
-        query: &str,
-        mut args: Vec<Box<dyn tokio_postgres::types::ToSql>>,
-    ) {
-        for c in query.chars() {
-            if c == '?' {
-                self.arg_indexes.push(self.cursor);
-            } else {
-                self.buffer.push(c);
-                self.cursor += c.len_utf8();
-            }
-        }
-
-        self.args.append(&mut args);
-    }
-
-    #[cfg(feature = "mysql-async")]
-    fn append_buffer_with_args(&mut self, query: &str, mut args: Vec<mysql_async::Value>) {
-        for c in query.chars() {
-            if c == '?' {
-                self.arg_indexes.push(self.cursor);
-            } else {
-                self.buffer.push(c);
-                self.cursor += c.len_utf8();
-            }
-        }
-
-        self.args.append(&mut args);
-    }
-
-    #[cfg(all(not(feature = "tokio-postgres"), not(feature = "mysql-async")))]
-    fn append_buffer_with_args(&mut self, query: &str, mut args: Vec<String>) {
-        for c in query.chars() {
-            if c == '?' {
-                self.arg_indexes.push(self.cursor);
-            } else {
-                self.buffer.push(c);
-                self.cursor += c.len_utf8();
-            }
-        }
-
-        self.args.append(&mut args);
-    }
-}
-
-impl Display for Query {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        #[cfg(feature = "indexed-args")]
-        let mut c = 1;
-
-        for a in [&[0], self.arg_indexes.as_slice(), &[self.buffer.len()]]
-            .concat()
-            .windows(2)
-        {
-            if a[0] != 0 {
-                #[cfg(feature = "indexed-args")]
-                {
-                    f.write_char('$')?;
-                    f.write_str(&c.to_string())?;
-                    c += 1;
-                }
-
-                #[cfg(not(feature = "indexed-args"))]
-                f.write_char('?')?;
-            }
-
-            f.write_str(&self.buffer[a[0]..a[1]])?;
-        }
-
-        Ok(())
-    }
-}
-
-pub trait Fragment {
-    fn push_to_query(self, query: &mut Query);
-}
-
-impl Fragment for &str {
-    fn push_to_query(self, query: &mut Query) {
-        query.append_buffer(self);
-    }
-}
-
-#[cfg(all(not(feature = "tokio-postgres"), not(feature = "mysql-async")))]
-macro_rules! impl_tuple_fragment {
-    ($($param:ident.$n:tt)*) => {
-        impl<$($param,)*> Fragment for (&str, $($param,)*)
-        where
-            $($param: ToString,)*
-        {
-            fn push_to_query(self, query: &mut Query) {
-                query.append_buffer_with_args(self.0, vec![
-                    $(self.$n.to_string(),)*
-                ]);
-            }
-        }
-    };
-}
-
-#[cfg(feature = "tokio-postgres")]
-macro_rules! impl_tuple_fragment {
-    ($($param:ident.$n:tt)*) => {
-        impl<$($param,)*> Fragment for (&str, $($param,)*)
-        where
-            $($param: tokio_postgres::types::ToSql + 'static,)*
-        {
-            fn push_to_query(self, query: &mut Query) {
-                query.append_buffer_with_args(self.0, vec![
-                    $(Box::new(self.$n),)*
-                ]);
-            }
-        }
-    };
-}
-
-#[cfg(feature = "mysql-async")]
-macro_rules! impl_tuple_fragment {
-    ($($param:ident.$n:tt)*) => {
-        impl<$($param,)*> Fragment for (&str, $($param,)*)
-        where
-            $($param: Into<mysql_async::Value>,)*
-        {
-            fn push_to_query(self, query: &mut Query) {
-                query.append_buffer_with_args(self.0, vec![
-                    $(self.$n.into(),)*
-                ]);
-            }
-        }
-    };
-}
-
-impl_tuple_fragment!(A.1);
-impl_tuple_fragment!(A.1 B.2);
-impl_tuple_fragment!(A.1 B.2 C.3);
-
-impl<F> Fragment for F
+impl<'a, T, A1> Into<ArgString<'a>> for (T, A1)
 where
-    F: FnOnce(&mut Query),
+    T: Trusted,
+    A1: Into<Type<'a>>,
 {
-    fn push_to_query(self, query: &mut Query) {
-        let separated = query.separated;
-
-        if separated {
-            query.separated = false;
-            query.append_buffer("(");
-        }
-
-        (self)(query);
-
-        if separated {
-            query.separated = true;
-            query.append_buffer(")");
+    fn into(self) -> ArgString<'a> {
+        ArgString {
+            raw: self.0.to_string(),
+            args: Args(vec![self.1.into()]),
         }
     }
 }
 
-impl Fragment for Query {
-    fn push_to_query(mut self, query: &mut Query) {
-        query.args.append(&mut self.args);
-
-        if query.separated {
-            query.append_buffer("(");
-        }
-
-        query
-            .arg_indexes
-            .extend(self.arg_indexes.into_iter().map(|i| i + query.cursor));
-
-        query.cursor += self.cursor;
-
-        query.append_buffer(&self.buffer);
-
-        if query.separated {
-            query.append_buffer(")");
+impl<'a, T, A1, A2> Into<ArgString<'a>> for (T, A1, A2)
+where
+    T: Trusted,
+    A1: Into<Type<'a>>,
+    A2: Into<Type<'a>>,
+{
+    fn into(self) -> ArgString<'a> {
+        ArgString {
+            raw: self.0.to_string(),
+            args: Args(vec![self.1.into(), self.2.into()]),
         }
     }
 }
 
-#[test]
-fn simple_query() {
-    let mut query = Query::new("SELECT");
-    query.comma("a");
-    query.comma("b");
-    query.comma("c");
-    query.push("FROM foobar WHERE");
-    query.and("foo = 'bar'");
-    query.and(("bar = ?", 1));
-
-    query.and(|q: &mut Query| {
-        q.or(("d = ?", 10));
-        q.or(("e != ?", 20));
-    });
-
-    #[cfg(feature = "indexed-args")]
-    assert_eq!(
-        query.to_string(),
-        "SELECT a,b,c FROM foobar WHERE foo = 'bar' AND bar = $1 AND ( d = $2 OR e != $3)"
-    );
-
-    #[cfg(not(feature = "indexed-args"))]
-    assert_eq!(
-        query.to_string(),
-        "SELECT a,b,c FROM foobar WHERE foo = 'bar' AND bar = ? AND ( d = ? OR e != ?)"
-    );
+impl<'a, T, A1, A2, A3> Into<ArgString<'a>> for (T, A1, A2, A3)
+where
+    T: Trusted,
+    A1: Into<Type<'a>>,
+    A2: Into<Type<'a>>,
+    A3: Into<Type<'a>>,
+{
+    fn into(self) -> ArgString<'a> {
+        ArgString {
+            raw: self.0.to_string(),
+            args: Args(vec![self.1.into(), self.2.into(), self.3.into()]),
+        }
+    }
 }
 
-#[test]
-fn query_concatenation() {
-    let mut query_a = Query::empty();
+impl<'a> Add for ArgString<'a> {
+    type Output = Self;
 
-    query_a.push(|query: &mut Query| {
-        query.or(("c = ?", 3));
-        query.or("d = 4");
-        query.or(("e = ?", 4));
-    });
+    fn add(mut self, mut other: Self) -> Self {
+        self.raw.push_str(&other.raw);
+        self.args.0.append(&mut other.args.0);
+        self
+    }
+}
 
-    let mut query_b = Query::new("SELECT * FROM test WHERE");
-    query_b.and(("a = ?", 1));
-    query_b.and(("b = ?", 2));
-    query_b.and(query_a);
+impl<'a> Add<&str> for ArgString<'a> {
+    type Output = Self;
 
-    #[cfg(feature = "indexed-args")]
-    assert_eq!(
-        query_b.to_string(),
-        "SELECT * FROM test WHERE a = $1 AND b = $2 AND (c = $3 OR d = 4 OR e = $4)"
-    );
+    fn add(mut self, other: &str) -> Self {
+        self.raw.push_str(&other);
+        self
+    }
+}
 
-    #[cfg(not(feature = "indexed-args"))]
-    assert_eq!(
-        query_b.to_string(),
-        "SELECT * FROM test WHERE a = ? AND b = ? AND (c = ? OR d = 4 OR e = ?)"
-    );
+pub enum LogicalOp {
+    And,
+    Or,
+}
 
-    let mut fields = Query::empty();
-    fields.comma("foo");
-    fields.comma("bar");
-    fields.comma(("? as foobar", 1000));
+pub struct Where<'a> {
+    op: LogicalOp,
+    inner: ArgString<'a>,
+}
 
-    let mut query = Query::new("SELECT");
-    query.push(fields);
-    query.push("FROM my_table");
+pub struct Having<'a> {
+    op: LogicalOp,
+    inner: ArgString<'a>,
+}
 
-    #[cfg(feature = "indexed-args")]
-    assert_eq!(
-        query.to_string(),
-        "SELECT foo,bar,$1 as foobar FROM my_table"
-    );
+enum Fragment<'a> {
+    Select(ArgString<'a>),
+    From(ArgString<'a>),
+    Where(Where<'a>),
+    Having(Having<'a>),
+    Raw(ArgString<'a>),
+}
 
-    #[cfg(not(feature = "indexed-args"))]
-    assert_eq!(
-        query.to_string(),
-        "SELECT foo,bar,? as foobar FROM my_table"
-    );
+impl Fragment<'_> {
+    fn is_empty(&self) -> bool {
+        match self {
+            Fragment::Select(i) => i,
+            Fragment::From(i) => i,
+            Fragment::Where(Where { inner, .. }) => inner,
+            Fragment::Having(Having { inner, .. }) => inner,
+            Fragment::Raw(i) => i,
+        }
+        .raw
+        .is_empty()
+    }
+}
+
+pub struct Query<'a>(Vec<Fragment<'a>>);
+
+pub fn raw<'a>(fragment: impl Into<ArgString<'a>>) -> Query<'a> {
+    Query(vec![Fragment::Raw(fragment.into())])
+}
+
+pub fn select<'a>(fragment: impl Into<ArgString<'a>>) -> Query<'a> {
+    Query(vec![Fragment::Select(fragment.into())])
+}
+
+pub fn from<'a>(fragment: impl Into<ArgString<'a>>) -> Query<'a> {
+    Query(vec![Fragment::From(fragment.into())])
+}
+
+pub fn r#where<'a>(fragment: impl Into<ArgString<'a>>) -> Where<'a> {
+    Where {
+        op: LogicalOp::And,
+        inner: fragment.into(),
+    }
+}
+
+pub fn wh<'a>(fragment: impl Into<ArgString<'a>>) -> Where<'a> {
+    r#where(fragment)
+}
+
+pub fn r#where_in<'a>(
+    column: &'static str,
+    values: impl IntoIterator<Item = impl Into<Type<'a>>>,
+) -> Where<'a> {
+    let args: Vec<Type> = values.into_iter().map(Into::into).collect();
+
+    if args.is_empty() {
+        return r#where("1=0");
+    }
+
+    Where {
+        op: LogicalOp::And,
+        inner: ArgString {
+            raw: column.to_string()
+                + " IN ("
+                + &("?,".repeat(args.len()).trim_end_matches(','))
+                + ")",
+            args: Args(args),
+        },
+    }
+}
+
+pub fn wh_in<'a>(
+    column: &'static str,
+    values: impl IntoIterator<Item = impl Into<Type<'a>>>,
+) -> Where<'a> {
+    r#where_in(column, values)
+}
+
+pub fn having<'a>(fragment: impl Into<ArgString<'a>>) -> Having<'a> {
+    Having {
+        op: LogicalOp::And,
+        inner: fragment.into(),
+    }
+}
+
+impl<'a> Add for Query<'a> {
+    type Output = Self;
+
+    fn add(mut self, mut other: Self) -> Self {
+        self.0.append(&mut other.0);
+        self
+    }
+}
+
+impl<'a, T> Add<T> for Query<'a>
+where
+    T: Into<ArgString<'a>>,
+{
+    type Output = Self;
+
+    fn add(mut self, other: T) -> Self {
+        self.0.push(Fragment::Raw(other.into()));
+        self
+    }
+}
+
+impl<'a> Add<Where<'a>> for Query<'a> {
+    type Output = Self;
+
+    fn add(mut self, other: Where<'a>) -> Self {
+        self.0.push(Fragment::Where(other));
+        self
+    }
+}
+
+impl<'a> Add<Having<'a>> for Query<'a> {
+    type Output = Self;
+
+    fn add(mut self, other: Having<'a>) -> Self {
+        self.0.push(Fragment::Having(other));
+        self
+    }
+}
+
+impl<'a> Add for Where<'a> {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        self & other
+    }
+}
+
+impl<'a> BitAnd for Where<'a> {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        use LogicalOp::*;
+
+        Where {
+            op: LogicalOp::And,
+            inner: match (self.op, rhs.op) {
+                (And, And) => self.inner + " AND " + rhs.inner,
+                (And, Or) => self.inner + " AND " + rhs.inner.wrapped(),
+                (Or, And) => self.inner.wrapped() + " AND " + rhs.inner,
+                (Or, Or) => self.inner.wrapped() + " AND " + rhs.inner.wrapped(),
+            },
+        }
+    }
+}
+
+impl<'a> BitOr for Where<'a> {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Where {
+            op: LogicalOp::Or,
+            inner: self.inner + " OR " + rhs.inner,
+        }
+    }
+}
+
+impl<'a> Not for Where<'a> {
+    type Output = Self;
+
+    fn not(mut self) -> Self::Output {
+        self.inner.raw.insert_str(0, "NOT (");
+        self.inner.raw.push(')');
+        self
+    }
+}
+
+impl<'a> Add for Having<'a> {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        self & other
+    }
+}
+
+impl<'a> BitAnd for Having<'a> {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        use LogicalOp::*;
+
+        Having {
+            op: LogicalOp::And,
+            inner: match (self.op, rhs.op) {
+                (And, And) => self.inner + " AND " + rhs.inner,
+                (And, Or) => self.inner + " AND " + rhs.inner.wrapped(),
+                (Or, And) => self.inner.wrapped() + " AND " + rhs.inner,
+                (Or, Or) => self.inner.wrapped() + " AND " + rhs.inner.wrapped(),
+            },
+        }
+    }
+}
+
+impl<'a> BitOr for Having<'a> {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Having {
+            op: LogicalOp::Or,
+            inner: self.inner + " OR " + rhs.inner,
+        }
+    }
+}
+
+impl<'a> Not for Having<'a> {
+    type Output = Self;
+
+    fn not(mut self) -> Self::Output {
+        self.inner.raw.insert_str(0, "NOT (");
+        self.inner.raw.push(')');
+        self
+    }
+}
+
+impl<'a> Query<'a> {
+    pub fn build(self) -> Result<(String, Args<'a>), crate::Error> {
+        let mut buffer = String::new();
+        let mut args = Vec::new();
+
+        let mut visited_select = false;
+        let mut visited_from = false;
+        let mut visited_where = false;
+        let mut visited_having = false;
+
+        for frag in self.0 {
+            if frag.is_empty() {
+                continue;
+            }
+
+            match frag {
+                Fragment::Select(mut f) => {
+                    if !visited_select {
+                        buffer.push_str("SELECT ");
+                        visited_select = true;
+                        buffer.push_str(&f.raw);
+                        args.append(&mut f.args.0);
+                    } else {
+                        buffer.push(',');
+                        buffer.push_str(&f.raw);
+                        args.append(&mut f.args.0);
+                    }
+                }
+                Fragment::From(mut f) => {
+                    if !visited_from {
+                        buffer.push_str(" FROM ");
+                        visited_from = true;
+                        buffer.push_str(&f.raw);
+                        args.append(&mut f.args.0);
+                    } else {
+                        buffer.push(',');
+                        buffer.push_str(&f.raw);
+                        args.append(&mut f.args.0);
+                    }
+                }
+                Fragment::Where(mut f) => {
+                    if !visited_where {
+                        buffer.push_str(" WHERE ");
+                        visited_where = true;
+
+                        match f.op {
+                            LogicalOp::And => {
+                                buffer.push_str(&f.inner.raw);
+                                args.append(&mut f.inner.args.0);
+                            }
+                            LogicalOp::Or => {
+                                buffer.push_str("(");
+                                buffer.push_str(&f.inner.raw);
+                                buffer.push(')');
+                                args.append(&mut f.inner.args.0);
+                            }
+                        }
+                    } else {
+                        match f.op {
+                            LogicalOp::And => {
+                                buffer.push_str(" AND ");
+                                buffer.push_str(&f.inner.raw);
+                                args.append(&mut f.inner.args.0);
+                            }
+                            LogicalOp::Or => {
+                                buffer.push_str(" AND (");
+                                buffer.push_str(&f.inner.raw);
+                                buffer.push(')');
+                                args.append(&mut f.inner.args.0);
+                            }
+                        }
+                    }
+                }
+                Fragment::Having(mut f) => {
+                    if !visited_having {
+                        buffer.push_str(" HAVING ");
+                        visited_having = true;
+
+                        match f.op {
+                            LogicalOp::And => {
+                                buffer.push_str(&f.inner.raw);
+                                args.append(&mut f.inner.args.0);
+                            }
+                            LogicalOp::Or => {
+                                buffer.push_str("(");
+                                buffer.push_str(&f.inner.raw);
+                                buffer.push(')');
+                                args.append(&mut f.inner.args.0);
+                            }
+                        }
+                    } else {
+                        match f.op {
+                            LogicalOp::And => {
+                                buffer.push_str(" AND ");
+                                buffer.push_str(&f.inner.raw);
+                                args.append(&mut f.inner.args.0);
+                            }
+                            LogicalOp::Or => {
+                                buffer.push_str(" AND (");
+                                buffer.push_str(&f.inner.raw);
+                                buffer.push(')');
+                                args.append(&mut f.inner.args.0);
+                            }
+                        }
+                    }
+                }
+                Fragment::Raw(mut f) => {
+                    buffer.push(' ');
+                    buffer.push_str(&f.raw);
+                    args.append(&mut f.args.0);
+                }
+            }
+        }
+
+        Ok((buffer, Args(args)))
+    }
 }
