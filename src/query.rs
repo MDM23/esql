@@ -226,6 +226,23 @@ pub fn having<'a>(fragment: impl Into<ArgString<'a>>) -> Having<'a> {
     }
 }
 
+pub fn raw_in<'a>(
+    fragment: &'static str,
+    values: impl IntoIterator<Item = impl Into<Type<'a>>>,
+) -> Query<'a> {
+    let args: Vec<Type> = values.into_iter().map(Into::into).collect();
+
+    // TODO: What should we do when `values` was empty?
+
+    Query(vec![Fragment::Raw(ArgString {
+        raw: fragment.to_string()
+            + " IN ("
+            + &("?,".repeat(args.len()).trim_end_matches(','))
+            + ")",
+        args: Args(args),
+    })])
+}
+
 impl<'a> Add for Query<'a> {
     type Output = Self;
 
