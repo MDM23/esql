@@ -128,6 +128,23 @@ impl<'a> Add<&str> for ArgString<'a> {
     }
 }
 
+pub fn join<'a>(sep: &str, args: impl IntoIterator<Item = ArgString<'a>>) -> ArgString<'a> {
+    let args: Vec<_> = args.into_iter().filter(|a| !a.raw.is_empty()).collect();
+
+    if args.is_empty() {
+        return ArgString::from("");
+    }
+
+    if args.len() == 1 {
+        return args.into_iter().nth(0).unwrap();
+    }
+
+    args.into_iter()
+        .filter(|a| !a.raw.is_empty())
+        .reduce(|acc, x| acc + sep + x)
+        .unwrap()
+}
+
 pub enum LogicalOp {
     And,
     Or,
@@ -299,10 +316,10 @@ impl<'a> BitAnd for Where<'a> {
         Where {
             op: LogicalOp::And,
             inner: match (self.op, rhs.op) {
-                (And, And) => self.inner + " AND " + rhs.inner,
-                (And, Or) => self.inner + " AND " + rhs.inner.wrapped(),
-                (Or, And) => self.inner.wrapped() + " AND " + rhs.inner,
-                (Or, Or) => self.inner.wrapped() + " AND " + rhs.inner.wrapped(),
+                (And, And) => join(" AND ", [self.inner, rhs.inner]),
+                (And, Or) => join(" AND ", [self.inner, rhs.inner.wrapped()]),
+                (Or, And) => join(" AND ", [self.inner.wrapped(), rhs.inner]),
+                (Or, Or) => join(" AND ", [self.inner.wrapped(), rhs.inner.wrapped()]),
             },
         }
     }
@@ -314,7 +331,7 @@ impl<'a> BitOr for Where<'a> {
     fn bitor(self, rhs: Self) -> Self::Output {
         Where {
             op: LogicalOp::Or,
-            inner: self.inner + " OR " + rhs.inner,
+            inner: join(" OR ", [self.inner, rhs.inner]),
         }
     }
 }
@@ -346,10 +363,10 @@ impl<'a> BitAnd for Having<'a> {
         Having {
             op: LogicalOp::And,
             inner: match (self.op, rhs.op) {
-                (And, And) => self.inner + " AND " + rhs.inner,
-                (And, Or) => self.inner + " AND " + rhs.inner.wrapped(),
-                (Or, And) => self.inner.wrapped() + " AND " + rhs.inner,
-                (Or, Or) => self.inner.wrapped() + " AND " + rhs.inner.wrapped(),
+                (And, And) => join(" AND ", [self.inner, rhs.inner]),
+                (And, Or) => join(" AND ", [self.inner, rhs.inner.wrapped()]),
+                (Or, And) => join(" AND ", [self.inner.wrapped(), rhs.inner]),
+                (Or, Or) => join(" AND ", [self.inner.wrapped(), rhs.inner.wrapped()]),
             },
         }
     }
@@ -361,7 +378,7 @@ impl<'a> BitOr for Having<'a> {
     fn bitor(self, rhs: Self) -> Self::Output {
         Having {
             op: LogicalOp::Or,
-            inner: self.inner + " OR " + rhs.inner,
+            inner: join(" OR ", [self.inner, rhs.inner]),
         }
     }
 }

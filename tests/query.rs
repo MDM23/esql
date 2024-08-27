@@ -1,4 +1,4 @@
-use esql::{from, select, wh, wh_in, Args, Query, Type};
+use esql::{from, having, select, wh, wh_in, Args, Query, Type};
 
 #[test]
 fn simple_query() {
@@ -46,6 +46,22 @@ fn query_where_in() {
     let query = select("*") + from("contacts") + wh_in("contacts.id", [] as [u32; 0]);
 
     assert_query(query, "SELECT * FROM contacts WHERE 1=0", [] as [u32; 0]);
+}
+
+#[test]
+fn test_empty_conditions() {
+    let query = select("foo FROM bar")
+        + (having("")
+            & having("")
+            & having(("test_a = ?", 1))
+            & having("")
+            & having(("test_b = ?", 2)));
+
+    assert_query(
+        query,
+        "SELECT foo FROM bar HAVING test_a = ? AND test_b = ?",
+        [1, 2],
+    );
 }
 
 fn assert_query<'a>(
