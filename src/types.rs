@@ -39,8 +39,11 @@ make_args! {
         Null,
         String(Cow<'a, str>),
 
+        #[cfg(feature = "time")]
+        OffsetDateTime(time::OffsetDateTime),
+
         #[cfg(feature = "uuid")]
-        Uuid(uuid::Uuid)
+        Uuid(uuid::Uuid),
     }
 }
 
@@ -62,6 +65,13 @@ impl<'a> Into<Type<'a>> for &'a str {
 impl<'a> Into<Type<'a>> for String {
     fn into(self) -> Type<'a> {
         Type::String(self.into())
+    }
+}
+
+#[cfg(feature = "time")]
+impl<'a> Into<Type<'a>> for time::OffsetDateTime {
+    fn into(self) -> Type<'a> {
+        Type::OffsetDateTime(self.into())
     }
 }
 

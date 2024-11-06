@@ -1,124 +1,209 @@
-use std::{fmt::Display, future::Future, ops::Deref};
+use std::{fmt::Display, future::Future, pin::pin};
 
-use futures_util::{Stream, StreamExt};
+use futures_util::StreamExt as _;
 use tokio_postgres::{
     row::RowIndex,
-    types::{FromSqlOwned, ToSql},
-    Client, Row, RowStream,
+    types::{private::BytesMut, FromSqlOwned, ToSql},
+    Client, Row, RowStream, Transaction,
 };
 
-use crate::query::Query;
+use crate::{
+    query::{ArgFormat, Query},
+    Type,
+};
 
-pub struct PostgresArg(Box<dyn ToSql>);
-
-impl Deref for PostgresArg {
-    type Target = dyn ToSql;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.deref()
-    }
-}
-
-impl<A: ToSql + 'static> From<A> for PostgresArg {
-    fn from(value: A) -> Self {
-        Self(Box::new(value))
-    }
-}
-
-type Result<T> = std::result::Result<T, crate::Error>;
-
-impl Query<PostgresArg> {
-    pub async fn get<DB, T>(self, db: DB) -> Result<impl IntoIterator<Item = T>>
-    where
-        DB: Deref<Target = Client>,
-        T: From<Row>,
-    {
-        Ok(self
-            .get_raw(db)
-            .await?
-            .map(|r| Into::<T>::into(r.unwrap()))
-            .collect::<Vec<_>>()
-            .await)
-    }
-
-    pub async fn first<DB, T>(self, db: DB) -> Result<Option<T>>
-    where
-        DB: Deref<Target = Client>,
-        T: From<Row>,
-    {
-        Ok(self.get(db).await?.into_iter().nth(0))
-    }
-
-    pub async fn pluck<DB, I, T>(self, db: DB, idx: I) -> Result<impl Stream<Item = T>>
-    where
-        DB: Deref<Target = Client>,
-        I: RowIndex + Display + Clone,
-        T: FromSqlOwned,
-    {
-        Ok(self
-            .get_raw(db)
-            .await?
-            .map(move |r| r.unwrap().get::<I, T>(idx.clone())))
-    }
-
-    pub async fn all_values<DB, T>(self, db: DB) -> Result<impl Stream<Item = T>>
-    where
-        DB: Deref<Target = Client>,
-        T: FromSqlOwned,
-    {
-        Ok(self.pluck(db, 0).await?)
-    }
-
-    pub async fn value<DB, T>(self, db: DB) -> Result<Option<T>>
-    where
-        DB: Deref<Target = Client>,
-        T: FromSqlOwned,
-    {
-        let values = self.all_values(db).await?;
-        futures_util::pin_mut!(values);
-
-        Ok(values.into_future().await.0)
-    }
-
-    pub async fn execute<DB, T>(self, db: DB) -> Result<u64>
-    where
-        DB: Deref<Target = Client>,
-    {
-        let (query, args) = self.build()?;
-
-        Ok(db
-            .deref()
-            .execute_raw(&query, args.iter().map(Deref::deref).collect::<Vec<_>>())
-            .await?)
-    }
-
-    pub async fn get_raw<DB>(self, db: DB) -> Result<RowStream>
-    where
-        DB: Deref<Target = Client>,
-    {
-        let (query, args) = self.build()?;
-
-        Ok(db
-            .deref()
-            .query_raw(&query, args.iter().map(Deref::deref).collect::<Vec<_>>())
-            .await?)
-    }
-}
-
-pub trait ClientExt: Deref<Target = Client> {
-    fn get<T>(
+impl ToSql for Type<'_> {
+    fn to_sql(
         &self,
-        query: Query<PostgresArg>,
-    ) -> impl Future<Output = Result<impl IntoIterator<Item = T>>>
+        ty: &tokio_postgres::types::Type,
+        out: &mut BytesMut,
+    ) -> Result<tokio_postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>>
     where
-        T: From<Row>,
+        Self: Sized,
     {
-        query.get(self.deref())
+        match self {
+            Type::Bool(a) => a.to_sql(ty, out),
+            Type::Int8(a) => a.to_sql(ty, out),
+            Type::Int16(a) => a.to_sql(ty, out),
+            Type::Int32(a) => a.to_sql(ty, out),
+            Type::Int64(a) => a.to_sql(ty, out),
+            Type::Isize(a) => (*a as i64).to_sql(ty, out),
+            Type::UInt8(a) => (*a as i16).to_sql(ty, out),
+            Type::UInt16(a) => (*a as u32).to_sql(ty, out),
+            Type::UInt32(a) => a.to_sql(ty, out),
+            Type::UInt64(a) => (*a as u32).to_sql(ty, out),
+            Type::Usize(a) => (*a as u32).to_sql(ty, out),
+            Type::Float(a) => a.to_sql(ty, out),
+            Type::Double(a) => a.to_sql(ty, out),
+            Type::Null => None::<Option<bool>>.to_sql(ty, out),
+            Type::String(a) => a.to_sql(ty, out),
+
+            #[cfg(feature = "time")]
+            Type::OffsetDateTime(a) => a.to_sql(ty, out),
+
+            #[cfg(feature = "uuid")]
+            Type::Uuid(a) => a.to_sql(ty, out),
+        }
     }
 
-    fn get_raw(&self, query: Query<PostgresArg>) -> impl Future<Output = Result<RowStream>> {
-        query.get_raw(self.deref())
+    fn accepts(_: &tokio_postgres::types::Type) -> bool
+    where
+        Self: Sized,
+    {
+        true
+    }
+
+    fn to_sql_checked(
+        &self,
+        ty: &tokio_postgres::types::Type,
+        out: &mut BytesMut,
+    ) -> Result<tokio_postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        self.to_sql(ty, out)
     }
 }
 
-impl ClientExt for &Client {}
+fn slice_iter<'a>(s: &'a [Type<'a>]) -> impl ExactSizeIterator<Item = &'a dyn ToSql> + 'a {
+    s.iter().map(|s| s as _)
+}
+
+pub trait PgQueryExt<'a, C>
+where
+    Self: Sized,
+{
+    fn get_raw(self, con: &C) -> impl Future<Output = Result<RowStream, crate::Error>>;
+    fn execute(self, con: &C) -> impl Future<Output = Result<u64, crate::Error>>;
+
+    fn get<T>(self, con: &C) -> impl Future<Output = Result<Vec<T>, crate::Error>>
+    where
+        T: TryFrom<Row>,
+    {
+        async move {
+            self.get_raw(con)
+                .await?
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .map(|row| {
+                    if let Ok(r) = row {
+                        r.try_into().map_err(|_| crate::Error::FromRowError)
+                    } else {
+                        Err(crate::Error::FromRowError)
+                    }
+                })
+                .collect()
+        }
+    }
+
+    fn first<T>(self, con: &C) -> impl Future<Output = Result<Option<T>, crate::Error>>
+    where
+        T: TryFrom<Row>,
+    {
+        async move {
+            match pin!(self.get_raw(con).await?).next().await {
+                None => Ok(None),
+                Some(row) => {
+                    if let Ok(r) = row {
+                        Ok(Some(r.try_into().map_err(|_| crate::Error::FromRowError)?))
+                    } else {
+                        Err(crate::Error::FromRowError)
+                    }
+                }
+            }
+        }
+    }
+
+    fn pluck<T, I>(self, con: &C, idx: I) -> impl Future<Output = Result<Vec<T>, crate::Error>>
+    where
+        T: FromSqlOwned,
+        I: RowIndex + ToOwned<Owned = I> + Display,
+    {
+        async move {
+            self.get_raw(con)
+                .await?
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .map(|row| {
+                    if let Ok(r) = row {
+                        r.try_get(idx.to_owned())
+                            .map_err(|_| crate::Error::FromRowError)
+                    } else {
+                        Err(crate::Error::FromRowError)
+                    }
+                })
+                .collect()
+        }
+    }
+
+    fn values<T>(self, con: &C) -> impl Future<Output = Result<Vec<T>, crate::Error>>
+    where
+        T: FromSqlOwned,
+    {
+        self.pluck(con, 0)
+    }
+
+    fn value<T>(self, con: &C) -> impl Future<Output = Result<Option<T>, crate::Error>>
+    where
+        T: FromSqlOwned,
+    {
+        async move {
+            match pin!(self.get_raw(con).await?).next().await {
+                None => Ok(None),
+                Some(row) => {
+                    if let Ok(r) = row {
+                        Ok(Some(r.try_get(0).map_err(|_| crate::Error::FromRowError)?))
+                    } else {
+                        Err(crate::Error::FromRowError)
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<'a, S> PgQueryExt<'a, Client> for Query<'a, S> {
+    fn get_raw(self, con: &Client) -> impl Future<Output = Result<RowStream, crate::Error>> {
+        async move {
+            let (statement, args) = self.build(ArgFormat::Indexed);
+
+            con.query_raw(&statement, slice_iter(&args))
+                .await
+                .map_err(|e| e.into())
+        }
+    }
+
+    fn execute(self, con: &Client) -> impl Future<Output = Result<u64, crate::Error>> {
+        async move {
+            let (statement, args) = self.build(ArgFormat::Indexed);
+
+            con.execute_raw(&statement, slice_iter(&args))
+                .await
+                .map_err(|e| e.into())
+        }
+    }
+}
+
+impl<'a, S> PgQueryExt<'a, Transaction<'a>> for Query<'a, S> {
+    fn get_raw(
+        self,
+        con: &Transaction<'a>,
+    ) -> impl Future<Output = Result<RowStream, crate::Error>> {
+        async move {
+            let (statement, args) = self.build(ArgFormat::Indexed);
+
+            con.query_raw(&statement, slice_iter(&args))
+                .await
+                .map_err(|e| e.into())
+        }
+    }
+
+    fn execute(self, con: &Transaction<'a>) -> impl Future<Output = Result<u64, crate::Error>> {
+        async move {
+            let (statement, args) = self.build(ArgFormat::Indexed);
+
+            con.execute_raw(&statement, slice_iter(&args))
+                .await
+                .map_err(|e| e.into())
+        }
+    }
+}

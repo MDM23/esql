@@ -1,15 +1,24 @@
-[package]
-name = "esql"
+# [workspace]
+# members = ["./macros"]
+
+[workspace.package]
 version = "0.1.2"
-description = "Useful and lightweight database extension library for your Rust project"
 license = "MIT"
 edition = "2021"
+
+[package]
+name = "esql"
+description = "Useful and lightweight database extension library for your Rust project"
 keywords = ["database", "async", "postgres", "mysql"]
 categories = ["database", "asynchronous"]
+version.workspace = true
+license.workspace = true
+edition.workspace = true
 
 [features]
 tokio-postgres = [ "dep:tokio-postgres" ]
 mysql-async = [ "dep:mysql_async", "dep:mysql_common" ]
+time = [ "dep:time", "tokio-postgres/with-time-0_3" ]
 uuid = [ "dep:uuid", "tokio-postgres/with-uuid-1" ]
 
 [dependencies]
@@ -29,6 +38,10 @@ optional = true
 [dependencies.tokio-postgres]
 version = "0.7"
 default-features = false
+optional = true
+
+[dependencies.time]
+version = "0.3"
 optional = true
 
 [dependencies.uuid]

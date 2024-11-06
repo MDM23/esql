@@ -1,6 +1,6 @@
-use std::ops::{Add, BitAnd, BitOr, Not};
+use std::{fmt::Display, ops::Add};
 
-use crate::types::Type;
+use crate::Type;
 
 /// Marker trait for a trusted string-like value that can be used in a SQL query
 trait Trusted: ToString {}
@@ -32,481 +32,294 @@ impl Trusted for TrustedString {}
 /// let field = String::from("username");
 ///
 /// if ["id", "username", "email"].contains(&field.as_str()) {
-///     esql::select(
-///         // SAFETY: field passed the whitelist-check
-///         unsafe { esql::trusted(format!("{field} as my_field")) }
-///     );
+///     // SAFETY: field passed the whitelist-check
+///     let q = esql::query("SELECT") + unsafe {
+///         esql::trusted(format!("{field} as my_field"))
+///     };
+///
+///     assert_eq!(q.to_string(), "SELECT username as my_field");
 /// }
 /// ```
 pub unsafe fn trusted(value: impl ToString) -> TrustedString {
     TrustedString(value.to_string())
 }
 
-#[derive(Debug, PartialEq)]
-pub struct Args<'a>(pub Vec<Type<'a>>);
-
-pub struct ArgString<'a> {
-    raw: String,
-    args: Args<'a>,
+#[derive(Debug)]
+pub struct QueryBuffer<'a> {
+    query: String,
+    args: Vec<Type<'a>>,
 }
 
-impl<'a> ArgString<'a> {
-    fn wrapped(mut self) -> Self {
-        self.raw.insert(0, '(');
-        self.raw.push(')');
-        self
+impl<'a> QueryBuffer<'a> {
+    fn push(&mut self, glue: &str, other: &mut Self) {
+        self.query.push_str(glue);
+        self.query.push_str(&other.query);
+        self.args.append(&mut other.args);
     }
 }
 
-impl<'a, T: Trusted> From<T> for ArgString<'a> {
+impl<'a, T: Trusted> From<T> for QueryBuffer<'a> {
     fn from(value: T) -> Self {
-        ArgString {
-            raw: value.to_string(),
-            args: Args(Vec::new()),
+        QueryBuffer {
+            query: value.to_string(),
+            args: Vec::new(),
         }
     }
 }
 
-impl<'a, T, A1> Into<ArgString<'a>> for (T, A1)
+impl<'a, T, A1> Into<QueryBuffer<'a>> for (T, A1)
 where
     T: Trusted,
     A1: Into<Type<'a>>,
 {
-    fn into(self) -> ArgString<'a> {
-        ArgString {
-            raw: self.0.to_string(),
-            args: Args(vec![self.1.into()]),
+    fn into(self) -> QueryBuffer<'a> {
+        QueryBuffer {
+            query: self.0.to_string(),
+            args: vec![self.1.into()],
         }
     }
 }
 
-impl<'a, T, A1, A2> Into<ArgString<'a>> for (T, A1, A2)
+impl<'a, T, A1, A2> Into<QueryBuffer<'a>> for (T, A1, A2)
 where
     T: Trusted,
     A1: Into<Type<'a>>,
     A2: Into<Type<'a>>,
 {
-    fn into(self) -> ArgString<'a> {
-        ArgString {
-            raw: self.0.to_string(),
-            args: Args(vec![self.1.into(), self.2.into()]),
+    fn into(self) -> QueryBuffer<'a> {
+        QueryBuffer {
+            query: self.0.to_string(),
+            args: vec![self.1.into(), self.2.into()],
         }
     }
 }
 
-impl<'a, T, A1, A2, A3> Into<ArgString<'a>> for (T, A1, A2, A3)
+impl<'a, T, A1, A2, A3> Into<QueryBuffer<'a>> for (T, A1, A2, A3)
 where
     T: Trusted,
     A1: Into<Type<'a>>,
     A2: Into<Type<'a>>,
     A3: Into<Type<'a>>,
 {
-    fn into(self) -> ArgString<'a> {
-        ArgString {
-            raw: self.0.to_string(),
-            args: Args(vec![self.1.into(), self.2.into(), self.3.into()]),
+    fn into(self) -> QueryBuffer<'a> {
+        QueryBuffer {
+            query: self.0.to_string(),
+            args: vec![self.1.into(), self.2.into(), self.3.into()],
         }
     }
 }
 
-impl<'a> Add for ArgString<'a> {
-    type Output = Self;
+#[derive(Debug)]
+pub struct Query<'a, S> {
+    buffer: QueryBuffer<'a>,
+    state: S,
+}
 
-    fn add(mut self, mut other: Self) -> Self {
-        self.raw.push_str(&other.raw);
-        self.args.0.append(&mut other.args.0);
-        self
+#[derive(Debug)]
+pub struct Raw;
+
+#[derive(Debug)]
+pub struct Where;
+
+#[derive(Debug)]
+pub struct Having;
+
+#[derive(Debug)]
+pub struct Suffixed;
+
+pub fn query<'a>(q: impl Into<QueryBuffer<'a>>) -> Query<'a, Raw> {
+    Query {
+        buffer: q.into(),
+        state: Raw,
     }
 }
 
-impl<'a> Add<&str> for ArgString<'a> {
-    type Output = Self;
+impl<'a> Query<'a, Raw> {
+    pub fn wh(mut self, q: impl Into<QueryBuffer<'a>>) -> Query<'a, Where> {
+        self.buffer.push(" WHERE ", &mut q.into());
 
-    fn add(mut self, other: &str) -> Self {
-        self.raw.push_str(&other);
-        self
-    }
-}
-
-pub fn join<'a>(sep: &str, args: impl IntoIterator<Item = ArgString<'a>>) -> ArgString<'a> {
-    let args: Vec<_> = args.into_iter().filter(|a| !a.raw.is_empty()).collect();
-
-    if args.is_empty() {
-        return ArgString::from("");
-    }
-
-    if args.len() == 1 {
-        return args.into_iter().nth(0).unwrap();
-    }
-
-    args.into_iter()
-        .filter(|a| !a.raw.is_empty())
-        .reduce(|acc, x| acc + sep + x)
-        .unwrap()
-}
-
-pub enum LogicalOp {
-    And,
-    Or,
-}
-
-pub struct Where<'a> {
-    op: LogicalOp,
-    inner: ArgString<'a>,
-}
-
-pub struct Having<'a> {
-    op: LogicalOp,
-    inner: ArgString<'a>,
-}
-
-enum Fragment<'a> {
-    Select(ArgString<'a>),
-    From(ArgString<'a>),
-    Where(Where<'a>),
-    Having(Having<'a>),
-    Raw(ArgString<'a>),
-}
-
-impl Fragment<'_> {
-    fn is_empty(&self) -> bool {
-        match self {
-            Fragment::Select(i) => i,
-            Fragment::From(i) => i,
-            Fragment::Where(Where { inner, .. }) => inner,
-            Fragment::Having(Having { inner, .. }) => inner,
-            Fragment::Raw(i) => i,
+        Query {
+            buffer: self.buffer,
+            state: Where,
         }
-        .raw
-        .is_empty()
+    }
+
+    pub fn having(mut self, q: impl Into<QueryBuffer<'a>>) -> Query<'a, Having> {
+        self.buffer.push(" HAVING ", &mut q.into());
+
+        Query {
+            buffer: self.buffer,
+            state: Having,
+        }
     }
 }
 
-pub struct Query<'a>(Vec<Fragment<'a>>);
-
-pub fn raw<'a>(fragment: impl Into<ArgString<'a>>) -> Query<'a> {
-    Query(vec![Fragment::Raw(fragment.into())])
-}
-
-pub fn select<'a>(fragment: impl Into<ArgString<'a>>) -> Query<'a> {
-    Query(vec![Fragment::Select(fragment.into())])
-}
-
-pub fn from<'a>(fragment: impl Into<ArgString<'a>>) -> Query<'a> {
-    Query(vec![Fragment::From(fragment.into())])
-}
-
-pub fn r#where<'a>(fragment: impl Into<ArgString<'a>>) -> Where<'a> {
-    Where {
-        op: LogicalOp::And,
-        inner: fragment.into(),
-    }
-}
-
-pub fn wh<'a>(fragment: impl Into<ArgString<'a>>) -> Where<'a> {
-    r#where(fragment)
-}
-
-pub fn r#where_in<'a>(
-    column: &'static str,
-    values: impl IntoIterator<Item = impl Into<Type<'a>>>,
-) -> Where<'a> {
-    let args: Vec<Type> = values.into_iter().map(Into::into).collect();
-
-    if args.is_empty() {
-        return r#where("1=0");
-    }
-
-    Where {
-        op: LogicalOp::And,
-        inner: ArgString {
-            raw: column.to_string()
-                + " IN ("
-                + &("?,".repeat(args.len()).trim_end_matches(','))
-                + ")",
-            args: Args(args),
-        },
-    }
-}
-
-pub fn wh_in<'a>(
-    column: &'static str,
-    values: impl IntoIterator<Item = impl Into<Type<'a>>>,
-) -> Where<'a> {
-    r#where_in(column, values)
-}
-
-pub fn having<'a>(fragment: impl Into<ArgString<'a>>) -> Having<'a> {
-    Having {
-        op: LogicalOp::And,
-        inner: fragment.into(),
-    }
-}
-
-pub fn raw_in<'a>(
-    fragment: &'static str,
-    values: impl IntoIterator<Item = impl Into<Type<'a>>>,
-) -> Query<'a> {
-    let args: Vec<Type> = values.into_iter().map(Into::into).collect();
-
-    // TODO: What should we do when `values` was empty?
-
-    Query(vec![Fragment::Raw(ArgString {
-        raw: fragment.to_string()
-            + " IN ("
-            + &("?,".repeat(args.len()).trim_end_matches(','))
-            + ")",
-        args: Args(args),
-    })])
-}
-
-impl<'a> Add for Query<'a> {
-    type Output = Self;
-
-    fn add(mut self, mut other: Self) -> Self {
-        self.0.append(&mut other.0);
+impl<'a> Query<'a, Where> {
+    pub fn and(mut self, q: impl Into<QueryBuffer<'a>>) -> Query<'a, Where> {
+        self.buffer.push(" AND ", &mut q.into());
         self
     }
+
+    pub fn or(mut self, q: impl Into<QueryBuffer<'a>>) -> Query<'a, Where> {
+        self.buffer.push(" OR ", &mut q.into());
+        self
+    }
+
+    pub fn having(mut self, q: impl Into<QueryBuffer<'a>>) -> Query<'a, Having> {
+        self.buffer.push(" HAVING ", &mut q.into());
+
+        Query {
+            buffer: self.buffer,
+            state: Having,
+        }
+    }
 }
 
-impl<'a, T> Add<T> for Query<'a>
+impl<'a, Q> Add<Q> for Query<'a, Raw>
 where
-    T: Into<ArgString<'a>>,
+    Q: Into<QueryBuffer<'a>>,
 {
     type Output = Self;
 
-    fn add(mut self, other: T) -> Self {
-        self.0.push(Fragment::Raw(other.into()));
+    fn add(mut self, rhs: Q) -> Self::Output {
+        self.buffer.push(" ", &mut rhs.into());
         self
     }
 }
 
-impl<'a> Add<Where<'a>> for Query<'a> {
-    type Output = Self;
+impl<'a, Q> Add<Q> for Query<'a, Where>
+where
+    Q: Into<QueryBuffer<'a>>,
+{
+    type Output = Query<'a, Suffixed>;
 
-    fn add(mut self, other: Where<'a>) -> Self {
-        self.0.push(Fragment::Where(other));
-        self
-    }
-}
+    fn add(mut self, rhs: Q) -> Self::Output {
+        self.buffer.push(" ", &mut rhs.into());
 
-impl<'a> Add<Having<'a>> for Query<'a> {
-    type Output = Self;
-
-    fn add(mut self, other: Having<'a>) -> Self {
-        self.0.push(Fragment::Having(other));
-        self
-    }
-}
-
-impl<'a> Add for Where<'a> {
-    type Output = Self;
-
-    fn add(self, other: Self) -> Self {
-        self & other
-    }
-}
-
-impl<'a> BitAnd for Where<'a> {
-    type Output = Self;
-
-    fn bitand(self, rhs: Self) -> Self::Output {
-        use LogicalOp::*;
-
-        Where {
-            op: LogicalOp::And,
-            inner: match (self.op, rhs.op) {
-                (And, And) => join(" AND ", [self.inner, rhs.inner]),
-                (And, Or) => join(" AND ", [self.inner, rhs.inner.wrapped()]),
-                (Or, And) => join(" AND ", [self.inner.wrapped(), rhs.inner]),
-                (Or, Or) => join(" AND ", [self.inner.wrapped(), rhs.inner.wrapped()]),
-            },
+        Query {
+            buffer: self.buffer,
+            state: Suffixed,
         }
     }
 }
 
-impl<'a> BitOr for Where<'a> {
-    type Output = Self;
+impl<'a, Q> Add<Q> for Query<'a, Having>
+where
+    Q: Into<QueryBuffer<'a>>,
+{
+    type Output = Query<'a, Suffixed>;
 
-    fn bitor(self, rhs: Self) -> Self::Output {
-        Where {
-            op: LogicalOp::Or,
-            inner: join(" OR ", [self.inner, rhs.inner]),
+    fn add(mut self, rhs: Q) -> Self::Output {
+        self.buffer.push(" ", &mut rhs.into());
+
+        Query {
+            buffer: self.buffer,
+            state: Suffixed,
         }
     }
 }
 
-impl<'a> Not for Where<'a> {
+impl<'a, Q> Add<Q> for Query<'a, Suffixed>
+where
+    Q: Into<QueryBuffer<'a>>,
+{
     type Output = Self;
 
-    fn not(mut self) -> Self::Output {
-        self.inner.raw.insert_str(0, "NOT (");
-        self.inner.raw.push(')');
+    fn add(mut self, rhs: Q) -> Self::Output {
+        self.buffer.push(" ", &mut rhs.into());
         self
     }
 }
 
-impl<'a> Add for Having<'a> {
-    type Output = Self;
+pub struct Expr<'a>(QueryBuffer<'a>);
 
-    fn add(self, other: Self) -> Self {
-        self & other
-    }
+pub fn expr<'a>(q: impl Into<QueryBuffer<'a>>) -> Expr<'a> {
+    Expr(q.into())
 }
 
-impl<'a> BitAnd for Having<'a> {
-    type Output = Self;
-
-    fn bitand(self, rhs: Self) -> Self::Output {
-        use LogicalOp::*;
-
-        Having {
-            op: LogicalOp::And,
-            inner: match (self.op, rhs.op) {
-                (And, And) => join(" AND ", [self.inner, rhs.inner]),
-                (And, Or) => join(" AND ", [self.inner, rhs.inner.wrapped()]),
-                (Or, And) => join(" AND ", [self.inner.wrapped(), rhs.inner]),
-                (Or, Or) => join(" AND ", [self.inner.wrapped(), rhs.inner.wrapped()]),
-            },
-        }
+impl<'a> Expr<'a> {
+    pub fn and(mut self, q: impl Into<QueryBuffer<'a>>) -> Self {
+        self.0.push(" AND ", &mut q.into());
+        self
     }
-}
 
-impl<'a> BitOr for Having<'a> {
-    type Output = Self;
-
-    fn bitor(self, rhs: Self) -> Self::Output {
-        Having {
-            op: LogicalOp::Or,
-            inner: join(" OR ", [self.inner, rhs.inner]),
-        }
-    }
-}
-
-impl<'a> Not for Having<'a> {
-    type Output = Self;
-
-    fn not(mut self) -> Self::Output {
-        self.inner.raw.insert_str(0, "NOT (");
-        self.inner.raw.push(')');
+    pub fn or(mut self, q: impl Into<QueryBuffer<'a>>) -> Self {
+        self.0.push(" OR ", &mut q.into());
         self
     }
 }
 
-impl<'a> Query<'a> {
-    pub fn build(self) -> Result<(String, Args<'a>), crate::Error> {
-        let mut buffer = String::new();
-        let mut args = Vec::new();
+impl<'a> From<Expr<'a>> for QueryBuffer<'a> {
+    fn from(mut value: Expr<'a>) -> Self {
+        value.0.query = String::from("(") + &value.0.query + ")";
+        value.0
+    }
+}
 
-        let mut visited_select = false;
-        let mut visited_from = false;
-        let mut visited_where = false;
-        let mut visited_having = false;
+pub fn in_expr<'a>(
+    subject: impl Into<QueryBuffer<'a>>,
+    values: impl IntoIterator<Item = impl Into<Type<'a>>>,
+) -> QueryBuffer<'a> {
+    let mut buffer = subject.into();
+    let args: Vec<Type> = values.into_iter().map(Into::into).collect();
 
-        for frag in self.0 {
-            if frag.is_empty() {
-                continue;
-            }
+    if args.is_empty() {
+        return QueryBuffer::from("1=0");
+    }
 
-            match frag {
-                Fragment::Select(mut f) => {
-                    if !visited_select {
-                        buffer.push_str("SELECT ");
-                        visited_select = true;
-                        buffer.push_str(&f.raw);
-                        args.append(&mut f.args.0);
-                    } else {
-                        buffer.push(',');
-                        buffer.push_str(&f.raw);
-                        args.append(&mut f.args.0);
+    let mut args = QueryBuffer {
+        query: String::from("(") + "?,".repeat(args.len()).trim_end_matches(',') + ")",
+        args,
+    };
+
+    buffer.push(" IN ", &mut args);
+    buffer
+}
+
+pub struct Fields<'a>(QueryBuffer<'a>);
+
+pub fn fields<'a>(items: impl IntoIterator<Item = impl Into<Type<'a>>>) -> Fields<'a> {
+    todo!()
+}
+
+pub enum ArgFormat {
+    QuestionMark,
+    Indexed,
+}
+
+impl<'a, T> Query<'a, T> {
+    pub fn build(self, format: ArgFormat) -> (String, Vec<Type<'a>>) {
+        if let ArgFormat::Indexed = format {
+            self.build_indexed()
+        } else {
+            (self.buffer.query, self.buffer.args)
+        }
+    }
+
+    fn build_indexed(self) -> (String, Vec<Type<'a>>) {
+        let mut n = 0;
+
+        (
+            // TODO: Enhance this process and support question marks in strings
+            self.buffer
+                .query
+                .chars()
+                .map(|c| match c {
+                    '?' => {
+                        n = n + 1;
+                        String::from("$") + &n.to_string()
                     }
-                }
-                Fragment::From(mut f) => {
-                    if !visited_from {
-                        buffer.push_str(" FROM ");
-                        visited_from = true;
-                        buffer.push_str(&f.raw);
-                        args.append(&mut f.args.0);
-                    } else {
-                        buffer.push(',');
-                        buffer.push_str(&f.raw);
-                        args.append(&mut f.args.0);
-                    }
-                }
-                Fragment::Where(mut f) => {
-                    if !visited_where {
-                        buffer.push_str(" WHERE ");
-                        visited_where = true;
+                    c => c.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .concat(),
+            self.buffer.args,
+        )
+    }
+}
 
-                        match f.op {
-                            LogicalOp::And => {
-                                buffer.push_str(&f.inner.raw);
-                                args.append(&mut f.inner.args.0);
-                            }
-                            LogicalOp::Or => {
-                                buffer.push_str("(");
-                                buffer.push_str(&f.inner.raw);
-                                buffer.push(')');
-                                args.append(&mut f.inner.args.0);
-                            }
-                        }
-                    } else {
-                        match f.op {
-                            LogicalOp::And => {
-                                buffer.push_str(" AND ");
-                                buffer.push_str(&f.inner.raw);
-                                args.append(&mut f.inner.args.0);
-                            }
-                            LogicalOp::Or => {
-                                buffer.push_str(" AND (");
-                                buffer.push_str(&f.inner.raw);
-                                buffer.push(')');
-                                args.append(&mut f.inner.args.0);
-                            }
-                        }
-                    }
-                }
-                Fragment::Having(mut f) => {
-                    if !visited_having {
-                        buffer.push_str(" HAVING ");
-                        visited_having = true;
-
-                        match f.op {
-                            LogicalOp::And => {
-                                buffer.push_str(&f.inner.raw);
-                                args.append(&mut f.inner.args.0);
-                            }
-                            LogicalOp::Or => {
-                                buffer.push_str("(");
-                                buffer.push_str(&f.inner.raw);
-                                buffer.push(')');
-                                args.append(&mut f.inner.args.0);
-                            }
-                        }
-                    } else {
-                        match f.op {
-                            LogicalOp::And => {
-                                buffer.push_str(" AND ");
-                                buffer.push_str(&f.inner.raw);
-                                args.append(&mut f.inner.args.0);
-                            }
-                            LogicalOp::Or => {
-                                buffer.push_str(" AND (");
-                                buffer.push_str(&f.inner.raw);
-                                buffer.push(')');
-                                args.append(&mut f.inner.args.0);
-                            }
-                        }
-                    }
-                }
-                Fragment::Raw(mut f) => {
-                    buffer.push(' ');
-                    buffer.push_str(&f.raw);
-                    args.append(&mut f.args.0);
-                }
-            }
-        }
-
-        Ok((buffer, Args(args)))
+impl<S> Display for Query<'_, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.buffer.query)
     }
 }
