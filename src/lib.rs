@@ -1,5 +1,6 @@
 mod database;
 mod query;
+mod serde;
 mod types;
 
 pub use query::{expr, in_expr, query, trusted, ArgFormat, Expr, Query, TrustedString};

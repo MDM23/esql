@@ -1,14 +1,18 @@
 use std::{fmt::Display, future::Future, pin::pin};
 
 use futures_util::StreamExt as _;
+use qp_postgres::PgPool;
+use serde::Deserialize;
 use tokio_postgres::{
     row::RowIndex,
+    tls::{MakeTlsConnect, TlsConnect},
     types::{private::BytesMut, FromSqlOwned, ToSql},
-    Client, Row, RowStream, Transaction,
+    Client, Row, RowStream, Socket, Transaction,
 };
 
 use crate::{
     query::{ArgFormat, Query},
+    serde::{Error, PgRow},
     Type,
 };
 
@@ -75,7 +79,7 @@ where
 
     fn get<T>(self, con: &C) -> impl Future<Output = Result<Vec<T>, crate::Error>>
     where
-        T: TryFrom<Row>,
+        T: for<'de> Deserialize<'de>,
     {
         async move {
             self.get_raw(con)
@@ -85,7 +89,7 @@ where
                 .into_iter()
                 .map(|row| {
                     if let Ok(r) = row {
-                        r.try_into().map_err(|_| crate::Error::FromRowError)
+                        Self::deserialize_row(&r).map_err(|_| crate::Error::FromRowError)
                     } else {
                         Err(crate::Error::FromRowError)
                     }
@@ -96,14 +100,16 @@ where
 
     fn first<T>(self, con: &C) -> impl Future<Output = Result<Option<T>, crate::Error>>
     where
-        T: TryFrom<Row>,
+        T: for<'de> Deserialize<'de>,
     {
         async move {
             match pin!(self.get_raw(con).await?).next().await {
                 None => Ok(None),
                 Some(row) => {
                     if let Ok(r) = row {
-                        Ok(Some(r.try_into().map_err(|_| crate::Error::FromRowError)?))
+                        Ok(Some(
+                            Self::deserialize_row(&r).map_err(|_| crate::Error::FromRowError)?,
+                        ))
                     } else {
                         Err(crate::Error::FromRowError)
                     }
@@ -159,6 +165,10 @@ where
             }
         }
     }
+
+    fn deserialize_row<T: for<'de> Deserialize<'de>>(row: &Row) -> Result<T, Error> {
+        Deserialize::deserialize(PgRow::from(row))
+    }
 }
 
 impl<'a, S> PgQueryExt<'a, Client> for Query<'a, S> {
@@ -202,6 +212,39 @@ impl<'a, S> PgQueryExt<'a, Transaction<'a>> for Query<'a, S> {
             let (statement, args) = self.build(ArgFormat::Indexed);
 
             con.execute_raw(&statement, slice_iter(&args))
+                .await
+                .map_err(|e| e.into())
+        }
+    }
+}
+
+#[cfg(feature = "qp-postgres")]
+impl<'a, S, T> PgQueryExt<'a, PgPool<T>> for Query<'a, S>
+where
+    T: MakeTlsConnect<Socket> + Clone + Send + Sync,
+    T::Stream: Send + Sync + 'static,
+    T::TlsConnect: Send + Sync,
+    <T::TlsConnect as TlsConnect<Socket>>::Future: Send,
+{
+    fn get_raw(self, con: &PgPool<T>) -> impl Future<Output = Result<RowStream, crate::Error>> {
+        async move {
+            let (statement, args) = self.build(ArgFormat::Indexed);
+
+            con.acquire()
+                .await?
+                .query_raw(&statement, slice_iter(&args))
+                .await
+                .map_err(|e| e.into())
+        }
+    }
+
+    fn execute(self, con: &PgPool<T>) -> impl Future<Output = Result<u64, crate::Error>> {
+        async move {
+            let (statement, args) = self.build(ArgFormat::Indexed);
+
+            con.acquire()
+                .await?
+                .execute_raw(&statement, slice_iter(&args))
                 .await
                 .map_err(|e| e.into())
         }
