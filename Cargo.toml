@@ -48,7 +48,7 @@ optional = true
 
 [dependencies.time]
 version = "0.3"
-features = ["serde"]
+features = ["formatting", "serde"]
 optional = true
 
 [dependencies.uuid]

@@ -148,6 +148,55 @@ impl<'a> FromSql<'a> for PgCol<'a> {
     }
 }
 
+use time::format_description::{modifier, BorrowedFormatItem, Component};
+
+const DATE_FORMAT: &[BorrowedFormatItem<'_>] = &[
+    BorrowedFormatItem::Component(Component::Year(modifier::Year::default())),
+    BorrowedFormatItem::Literal(b"-"),
+    BorrowedFormatItem::Component(Component::Month(modifier::Month::default())),
+    BorrowedFormatItem::Literal(b"-"),
+    BorrowedFormatItem::Component(Component::Day(modifier::Day::default())),
+];
+
+const TIME_FORMAT: &[BorrowedFormatItem<'_>] = &[
+    BorrowedFormatItem::Component(Component::Hour(modifier::Hour::default())),
+    BorrowedFormatItem::Literal(b":"),
+    BorrowedFormatItem::Component(Component::Minute(modifier::Minute::default())),
+    BorrowedFormatItem::Literal(b":"),
+    BorrowedFormatItem::Component(Component::Second(modifier::Second::default())),
+    BorrowedFormatItem::Literal(b"."),
+    BorrowedFormatItem::Component(Component::Subsecond(modifier::Subsecond::default())),
+];
+
+const UTC_OFFSET_HOUR: modifier::OffsetHour = {
+    let mut m = modifier::OffsetHour::default();
+    m.sign_is_mandatory = true;
+    m
+};
+
+const UTC_OFFSET_MINUTE: modifier::OffsetMinute = modifier::OffsetMinute::default();
+const UTC_OFFSET_SECOND: modifier::OffsetSecond = modifier::OffsetSecond::default();
+
+const UTC_OFFSET_FORMAT: &[BorrowedFormatItem<'_>] = &[
+    BorrowedFormatItem::Component(Component::OffsetHour(UTC_OFFSET_HOUR)),
+    BorrowedFormatItem::Optional(&BorrowedFormatItem::Compound(&[
+        BorrowedFormatItem::Literal(b":"),
+        BorrowedFormatItem::Component(Component::OffsetMinute(UTC_OFFSET_MINUTE)),
+        BorrowedFormatItem::Optional(&BorrowedFormatItem::Compound(&[
+            BorrowedFormatItem::Literal(b":"),
+            BorrowedFormatItem::Component(Component::OffsetSecond(UTC_OFFSET_SECOND)),
+        ])),
+    ])),
+];
+
+const OFFSET_DATE_TIME_FORMAT: &[BorrowedFormatItem<'_>] = &[
+    BorrowedFormatItem::Compound(DATE_FORMAT),
+    BorrowedFormatItem::Literal(b" "),
+    BorrowedFormatItem::Compound(TIME_FORMAT),
+    BorrowedFormatItem::Literal(b" "),
+    BorrowedFormatItem::Compound(UTC_OFFSET_FORMAT),
+];
+
 impl<'a, 'de> Deserializer<'de> for PgCol<'a> {
     type Error = Error;
 
@@ -173,7 +222,8 @@ impl<'a, 'de> Deserializer<'de> for PgCol<'a> {
             Type::TIMESTAMPTZ => visitor.visit_string(
                 OffsetDateTime::from_sql(&self.ty, &self.raw)
                     .unwrap()
-                    .to_string(),
+                    .format(OFFSET_DATE_TIME_FORMAT)
+                    .unwrap(),
             ),
 
             _ => todo!(),
