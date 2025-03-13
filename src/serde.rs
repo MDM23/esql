@@ -1,5 +1,8 @@
 use core::slice;
-use std::fmt::{self, Display};
+use std::{
+    fmt::{self, Display},
+    net::IpAddr,
+};
 
 use serde::{
     de::{MapAccess, Visitor},
@@ -215,6 +218,10 @@ impl<'a, 'de> Deserializer<'de> for PgCol<'a> {
                 visitor.visit_string(FromSql::from_sql(&self.ty, &self.raw).unwrap())
             }
 
+            Type::INET => {
+                visitor.visit_string(IpAddr::from_sql(&self.ty, &self.raw).unwrap().to_string())
+            }
+
             #[cfg(feature = "uuid")]
             Type::UUID => visitor.visit_bytes(FromSql::from_sql(&self.ty, &self.raw).unwrap()),
 
@@ -226,7 +233,7 @@ impl<'a, 'de> Deserializer<'de> for PgCol<'a> {
                     .unwrap(),
             ),
 
-            _ => todo!(),
+            ty => unimplemented!("{:?}", ty),
         }
     }
 
