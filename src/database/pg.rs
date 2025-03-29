@@ -42,6 +42,9 @@ impl ToSql for Type<'_> {
             Type::Null => None::<Option<bool>>.to_sql(ty, out),
             Type::String(a) => a.to_sql(ty, out),
 
+            #[cfg(feature = "serde-json")]
+            Type::Json(a) => a.to_sql(ty, out),
+
             #[cfg(feature = "time")]
             Type::OffsetDateTime(a) => a.to_sql(ty, out),
 

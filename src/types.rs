@@ -39,6 +39,9 @@ make_args! {
         Null,
         String(Cow<'a, str>),
 
+        #[cfg(feature = "serde-json")]
+        Json(serde_json::Value),
+
         #[cfg(feature = "time")]
         OffsetDateTime(time::OffsetDateTime),
 
@@ -68,16 +71,23 @@ impl<'a> Into<Type<'a>> for String {
     }
 }
 
+#[cfg(feature = "serde-json")]
+impl<'a> Into<Type<'a>> for serde_json::Value {
+    fn into(self) -> Type<'a> {
+        Type::Json(self)
+    }
+}
+
 #[cfg(feature = "time")]
 impl<'a> Into<Type<'a>> for time::OffsetDateTime {
     fn into(self) -> Type<'a> {
-        Type::OffsetDateTime(self.into())
+        Type::OffsetDateTime(self)
     }
 }
 
 #[cfg(feature = "uuid")]
 impl<'a> Into<Type<'a>> for uuid::Uuid {
     fn into(self) -> Type<'a> {
-        Type::Uuid(self.into())
+        Type::Uuid(self)
     }
 }
