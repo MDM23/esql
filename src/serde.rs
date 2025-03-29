@@ -222,6 +222,11 @@ impl<'a, 'de> Deserializer<'de> for PgCol<'a> {
                 visitor.visit_string(IpAddr::from_sql(&self.ty, &self.raw).unwrap().to_string())
             }
 
+            #[cfg(feature = "serde-json")]
+            Type::JSONB | Type::JSON => {
+                visitor.visit_bytes(FromSql::from_sql(&self.ty, &self.raw).unwrap())
+            }
+
             #[cfg(feature = "uuid")]
             Type::UUID => visitor.visit_bytes(FromSql::from_sql(&self.ty, &self.raw).unwrap()),
 
